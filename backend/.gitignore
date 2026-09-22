@@ -1,0 +1,14 @@
+# Dependencies
+node_modules
+
+# Environment / secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor junk
+.DS_Store
