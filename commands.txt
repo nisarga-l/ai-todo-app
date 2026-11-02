@@ -1,0 +1,23 @@
+cd "C:\Users\nisar\OneDrive\Documents\Desktop\ai-todo-app-main"
+git --version
+git status
+git init
+git status
+git status --ignored
+git add .
+git status
+git commit -m "Initial commit - AI Todo App"
+git config --global user.name "Nisarga L"
+git config --global user.email "nisarga.lbb@gmail.com"
+git config --global user.name
+git config --global user.email
+git commit -m "Initial commit - AI Todo App"
+git branch -M main
+https://github.com/nisarga-l/ai-todo-app.git
+git remote add origin https://github.com/nisarga-l/ai-todo-app.git
+git remote -v
+git push -u origin main
+git add backend/.env.example
+git commit --amend --no-edit
+git push -u origin main
+doskey /history > commands.txt

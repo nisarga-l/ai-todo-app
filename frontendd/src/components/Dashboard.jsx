@@ -8,10 +8,17 @@ import {
   ArcElement,
   Tooltip,
   Legend,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  LineElement,
+  PointElement,
+  RadialLinearScale,
+  Filler,
 } from "chart.js";
-import { Doughnut } from "react-chartjs-2";
+import { Doughnut, Bar, Pie, Line, Radar, PolarArea } from "react-chartjs-2";
 
-ChartJS.register(ArcElement, Tooltip, Legend);
+ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, LineElement, PointElement, RadialLinearScale, Filler);
 
 function Dashboard() {
   const { user, logout } = useAuth();
@@ -23,7 +30,49 @@ function Dashboard() {
   const [task, setTask] = useState("");
   const [priority, setPriority] = useState("Medium");
   const [dueDate, setDueDate] = useState("");
+  const [reminderTime, setReminderTime] = useState("");
+  const reminderStorageKey = `ai-todo-reminders-${user?._id || user?.id || user?.email || "default"}`;
+  const [reminders, setReminders] = useState({});
+  const [activeReminder, setActiveReminder] = useState(null);
 
+  // Reminders are stored in this browser, not in MongoDB.
+  useEffect(() => {
+    try {
+      setReminders(JSON.parse(localStorage.getItem(reminderStorageKey) || "{}"));
+    } catch {
+      setReminders({});
+    }
+  }, [reminderStorageKey]);
+
+  const updateReminders = (change) => {
+    setReminders((current) => {
+      const next = change(current);
+      localStorage.setItem(reminderStorageKey, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  // Check every second while the dashboard is open.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const due = tasks.find((t) => {
+        const r = reminders[t._id];
+        return !t.completed && r && !r.shown &&
+          Number.isFinite(new Date(r.at).getTime()) &&
+          new Date(r.at).getTime() <= now;
+      });
+      if (!due) return;
+      setActiveReminder({ id: due._id, text: due.text });
+      updateReminders((current) => ({
+        ...current,
+        [due._id]: { ...current[due._id], shown: true },
+      }));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [tasks, reminders, reminderStorageKey]);
+
+  const [showReports, setShowReports] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("All");
   // "Midnight Focus" dark theme is the default; remember the user's choice.
@@ -83,7 +132,14 @@ function Dashboard() {
         priority,
         dueDate,
       });
-      setTasks([response.data, ...tasks]);
+      setTasks((prev) => [response.data, ...prev]);
+      if (reminderTime) {
+        updateReminders((prev) => ({
+          ...prev,
+          [response.data._id]: { at: reminderTime, shown: false },
+        }));
+      }
+      setReminderTime("");
       setTask("");
       setPriority("Medium");
       setDueDate("");
@@ -171,6 +227,11 @@ function Dashboard() {
     try {
       await client.delete(`/tasks/${t._id}`);
       setTasks((prev) => prev.filter((x) => x._id !== t._id));
+      updateReminders((prev) => {
+        const next = { ...prev };
+        delete next[t._id];
+        return next;
+      });
       pushToast("Task deleted", "success");
     } catch (error) {
       pushToast("Could not delete task", "error");
@@ -198,6 +259,17 @@ function Dashboard() {
           x._id === editingTask._id ? response.data : x
         )
       );
+      updateReminders((prev) => {
+        const next = { ...prev };
+        if (editingTask.reminderTime) {
+          if (prev[editingTask._id]?.at !== editingTask.reminderTime) {
+            next[editingTask._id] = { at: editingTask.reminderTime, shown: false };
+          }
+        } else {
+          delete next[editingTask._id];
+        }
+        return next;
+      });
       setShowModal(false);
       setEditingTask(null);
       pushToast("Task updated", "success");
@@ -325,6 +397,55 @@ function Dashboard() {
     ],
   };
 
+  // Report figures are calculated from the tasks returned by the backend.
+  const reportPending = tasks.length - completedTasks;
+  const reportCompletionRate = tasks.length
+    ? Math.round((completedTasks / tasks.length) * 100)
+    : 0;
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const reportOverdue = tasks.filter((t) => {
+    if (t.completed || !t.dueDate) return false;
+    const datePart = String(t.dueDate).slice(0, 10);
+    const due = new Date(`${datePart}T00:00:00`);
+    return !Number.isNaN(due.getTime()) && due < todayStart;
+  }).length;
+  const reportUpcoming = tasks.filter((t) => {
+    if (t.completed || !t.dueDate) return false;
+    const due = new Date(`${String(t.dueDate).slice(0, 10)}T00:00:00`);
+    const sevenDays = new Date(todayStart);
+    sevenDays.setDate(sevenDays.getDate() + 7);
+    return !Number.isNaN(due.getTime()) && due >= todayStart && due < sevenDays;
+  }).length;
+  const reportWeeklyLabels = [];
+  const reportWeeklyCounts = [];
+  for (let i = 6; i >= 0; i--) {
+    const day = new Date(todayStart);
+    day.setDate(day.getDate() - i);
+    const next = new Date(day);
+    next.setDate(next.getDate() + 1);
+    reportWeeklyLabels.push(day.toLocaleDateString(undefined, { weekday: "short", day: "numeric" }));
+    reportWeeklyCounts.push(tasks.filter((t) => {
+      // Only count tasks with a creation timestamp from MongoDB.
+      if (!t.createdAt) return false;
+      const created = new Date(t.createdAt);
+      return !Number.isNaN(created.getTime()) && created >= day && created < next;
+    }).length);
+  }
+  const reportBarOptions = {
+    responsive: true,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: chartLabel }, grid: { display: false } },
+      y: { beginAtZero: true, ticks: { color: chartLabel, precision: 0 } },
+    },
+  };
+  const reportCardStyle = {
+    padding: "16px", borderRadius: "12px", background: darkMode ? "#202633" : "#f3f5f9",
+    color: darkMode ? "#f5f6fb" : "#202633", flex: "1 1 150px",
+  };
+  const reportChartStyle = { ...reportCardStyle, flex: "1 1 300px", minWidth: 0 };
+
   const filteredTasks = tasks
     .filter((t) =>
       t.text.toLowerCase().includes(search.toLowerCase())
@@ -392,6 +513,109 @@ function Dashboard() {
             <p>{assistantText}</p>
           )}
         </div>
+      )}
+
+      {/* Reports & Analytics: all counts come from the loaded tasks. */}
+      <div style={{ margin: "18px 0" }}>
+        <button
+          type="button"
+          className="assistant-btn"
+          onClick={() => setShowReports((value) => !value)}
+          aria-expanded={showReports}
+        >
+          📈 {showReports ? "Hide Reports & Analytics" : "View Reports & Analytics"}
+        </button>
+      </div>
+      {showReports && (
+        <section id="task-report" style={{ margin: "16px 0 28px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+            <div>
+              <h2>📊 Task Reports & Analytics</h2>
+              <p>Live summary of your saved tasks</p>
+            </div>
+            <button type="button" className="add-btn" onClick={() => window.print()}>
+              🖨️ Print / Save as PDF
+            </button>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, margin: "18px 0" }}>
+            {[
+              ["Total Tasks", tasks.length],
+              ["Completed", completedTasks],
+              ["Pending", reportPending],
+              ["Completion Rate", `${reportCompletionRate}%`],
+              ["Overdue", reportOverdue],
+              ["Due Next 7 Days", reportUpcoming],
+            ].map(([label, value]) => (
+              <div key={label} style={reportCardStyle}>
+                <div style={{ fontSize: 13, opacity: 0.8 }}>{label}</div>
+                <strong style={{ fontSize: 28 }}>{value}</strong>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
+            <div style={reportChartStyle}>
+              <h3>Task Completion</h3>
+              <div style={{ maxWidth: 290, margin: "auto" }}>
+                <Doughnut data={chartData} options={chartOptions} />
+              </div>
+            </div>
+            <div style={reportChartStyle}>
+              <h3>Priority Breakdown</h3>
+              <div style={{ maxWidth: 290, margin: "auto" }}>
+                <Doughnut data={priorityChartData} options={chartOptions} />
+              </div>
+            </div>
+            <div style={reportChartStyle}>
+              <h3>Pie Chart — Completed vs Pending</h3>
+              <div style={{ maxWidth: 290, margin: "auto" }}>
+                <Pie data={chartData} options={chartOptions} />
+              </div>
+            </div>
+            <div style={reportChartStyle}>
+              <h3>Pie Chart — Task Priorities</h3>
+              <div style={{ maxWidth: 290, margin: "auto" }}>
+                <Pie data={priorityChartData} options={chartOptions} />
+              </div>
+            </div>
+            <div style={reportChartStyle}>
+              <h3>Polar Area — Task Priorities</h3>
+              <div style={{ maxWidth: 290, margin: "auto" }}>
+                <PolarArea data={priorityChartData} options={{ plugins: chartOptions.plugins, scales: { r: { ticks: { color: chartLabel, backdropColor: 'transparent' }, grid: { color: chartMuted } } } }} />
+              </div>
+            </div>
+            <div style={reportChartStyle}>
+              <h3>Radar Chart — Task Priorities</h3>
+              <div style={{ maxWidth: 290, margin: "auto" }}>
+                <Radar data={{ ...priorityChartData, datasets: priorityChartData.datasets.map((dataset) => ({ ...dataset, label: "Tasks by priority", backgroundColor: darkMode ? "rgba(53,224,196,0.2)" : "rgba(16,168,146,0.2)", borderColor: darkMode ? "#35e0c4" : "#10a892", pointBackgroundColor: darkMode ? "#35e0c4" : "#10a892" })) }} options={{ plugins: chartOptions.plugins, scales: { r: { beginAtZero: true, ticks: { color: chartLabel, precision: 0, backdropColor: 'transparent' }, pointLabels: { color: chartLabel }, grid: { color: chartMuted } } } }} />
+              </div>
+            </div>
+            <div style={{ ...reportChartStyle, flex: "1 1 100%" }}>
+              <h3>Line Graph — Tasks Created in Last 7 Days</h3>
+              <Line
+                data={{ labels: reportWeeklyLabels, datasets: [{ label: "Tasks created", data: reportWeeklyCounts, borderColor: darkMode ? "#35e0c4" : "#10a892", backgroundColor: darkMode ? "rgba(53,224,196,0.18)" : "rgba(16,168,146,0.18)", fill: true, tension: 0.3 }] }}
+                options={reportBarOptions}
+              />
+            </div>
+            <div style={{ ...reportChartStyle, flex: "1 1 100%" }}>
+              <h3>Tasks Created — Last 7 Days</h3>
+              <Bar
+                data={{
+                  labels: reportWeeklyLabels,
+                  datasets: [{
+                    label: "Tasks created",
+                    data: reportWeeklyCounts,
+                    backgroundColor: darkMode ? "#35e0c4" : "#10a892",
+                    borderRadius: 5,
+                  }],
+                }}
+                options={reportBarOptions}
+              />
+              <p style={{ fontSize: 12, opacity: 0.7 }}>
+                Weekly chart uses task creation dates when available.
+              </p>
+            </div>
+          </div>
+        </section>
       )}
 
       <div className="charts-wrapper">
@@ -504,6 +728,16 @@ function Dashboard() {
           onChange={(e) => setDueDate(e.target.value)}
         />
 
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+          🔔 Reminder Date & Time
+          <input
+            type="datetime-local"
+            aria-label="Reminder date and time"
+            value={reminderTime}
+            onChange={(e) => setReminderTime(e.target.value)}
+          />
+        </label>
+
         <button
           className="add-btn"
           onClick={addTask}
@@ -541,6 +775,12 @@ function Dashboard() {
 
                 {t.dueDate && (
                   <p className="due-date">📅 {t.dueDate}</p>
+                )}
+                {reminders[t._id] && (
+                  <p className="due-date">
+                    🔔 Reminder: {new Date(reminders[t._id].at).toLocaleString()}
+                    {reminders[t._id].shown ? " (shown)" : ""}
+                  </p>
                 )}
 
                 {t.subtasks && t.subtasks.length > 0 && (
@@ -583,7 +823,10 @@ function Dashboard() {
                 <button
                   className="edit-btn"
                   onClick={() => {
-                    setEditingTask(t);
+                    setEditingTask({
+                      ...t,
+                      reminderTime: reminders[t._id]?.at || "",
+                    });
                     setShowModal(true);
                   }}
                 >
@@ -611,6 +854,19 @@ function Dashboard() {
             </li>
           ))}
         </ul>
+      )}
+
+      {activeReminder && (
+        <div className="modal-overlay" role="alertdialog" aria-modal="true" aria-label="Task reminder">
+          <div className="modal" style={{ textAlign: "center", maxWidth: 420 }}>
+            <h2>🔔 Task Reminder!</h2>
+            <p style={{ margin: "20px 0" }}>{activeReminder.text}</p>
+            <p>Your scheduled reminder time has arrived.</p>
+            <button className="save-btn" onClick={() => setActiveReminder(null)}>
+              Dismiss
+            </button>
+          </div>
+        </div>
       )}
 
       {showModal && (
@@ -653,6 +909,18 @@ function Dashboard() {
                 })
               }
             />
+
+            <label style={{ display: "block", marginBottom: 12 }}>
+              🔔 Reminder Date & Time
+              <input
+                type="datetime-local"
+                value={editingTask?.reminderTime || ""}
+                onChange={(e) => setEditingTask({
+                  ...editingTask,
+                  reminderTime: e.target.value,
+                })}
+              />
+            </label>
 
             <div className="modal-buttons">
               <button
